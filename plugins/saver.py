@@ -51,16 +51,38 @@ class SaveWorker:
     def progress_line(percent: int) -> str:
         blocks = max(0, min(10, percent // 10))
         bar = "▰" * blocks + "▱" * (10 - blocks)
-        return f"`{bar} [{percent}%]`"
+        return f"<code>[ {bar} ] {percent}%</code>"
 
-    async def update_status(self, status_message: Message, percent: int, detail: str):
+    async def progress_update(
+        self,
+        status_message: Message,
+        percent: int,
+        state: str,
+        message_effect_id: str | None = None,
+    ):
+        state_icon = {
+            "downloading": "📥",
+            "uploading": "📤",
+            "completed": "✅",
+        }.get(state.lower(), "⚙️")
+
+        body = (
+            "<b>𝑺𝒂𝒗𝒆 𝑷𝒓𝒐𝒄𝒆𝒔𝒔</b>\n"
+            f"{self.progress_line(percent)}\n"
+            f"<i>Status: {state_icon} {state}</i>"
+        )
+
         await self.safe_call(
             status_message.edit_text(
-                "`[ SAVER STATUS ]`\n"
-                f"{self.progress_line(percent)}\n"
-                f"`{detail}`"
+                body,
+                disable_web_page_preview=True,
+                message_effect_id=message_effect_id,
             )
         )
+
+    async def update_status(self, status_message: Message, percent: int, detail: str):
+        effect = "5104841245755180586" if percent >= 100 else None
+        await self.progress_update(status_message, percent, detail, message_effect_id=effect)
 
     async def process_job(self, job: Job):
         status = await self.bot.get_messages(job.status_chat_id, job.status_message_id)
