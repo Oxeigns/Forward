@@ -11,6 +11,11 @@ except Exception:
     pass
 
 import asyncio
+
+# Pyrogram's import side effects may call asyncio.get_event_loop() when sync
+# helpers are present. Python 3.11 + uvloop no longer creates one implicitly.
+asyncio.set_event_loop(asyncio.new_event_loop())
+
 import main
 
 
