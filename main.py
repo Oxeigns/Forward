@@ -10,6 +10,11 @@ from config import config
 from plugins.fsub import is_user_verified, premium_dashboard_markup, premium_fsub_markup, safe_call
 from plugins.saver import Job, SaveWorker
 
+try:
+    import uvloop
+except Exception:  # pragma: no cover
+    uvloop = None
+
 bot = Client(
     "forward_saver_bot",
     api_id=config.api_id,
@@ -30,7 +35,7 @@ mongo = AsyncIOMotorClient(config.mongo_url)
 db = mongo["forward_saver"]
 users_col = db["users"]
 
-save_worker = SaveWorker(bot=bot, userbot=userbot)
+save_worker = SaveWorker(bot=bot, userbot=userbot, downloads_dir=config.downloads_dir)
 
 
 async def add_user(user_id: int):
@@ -118,6 +123,23 @@ async def stats_handler(_, message: Message):
     )
 
 
+@bot.on_message(filters.command("clearqueue") & filters.private)
+async def clear_queue_handler(_, message: Message):
+    if message.from_user.id != config.owner_id:
+        return
+
+    cleared = 0
+    while not save_worker.queue.empty():
+        try:
+            save_worker.queue.get_nowait()
+            save_worker.queue.task_done()
+            cleared += 1
+        except asyncio.QueueEmpty:
+            break
+
+    await message.reply_text(f"`[ QUEUE CLEARED ] removed={cleared}`")
+
+
 @bot.on_message(filters.command("broadcast") & filters.private)
 async def broadcast_handler(_, message: Message):
     if message.from_user.id != config.owner_id:
@@ -142,10 +164,15 @@ async def broadcast_handler(_, message: Message):
 
 
 async def main():
+    if uvloop is not None:
+        uvloop.install()
+
     await bot.start()
     if userbot is not None:
         await userbot.start()
-    asyncio.create_task(save_worker.run())
+
+    for _ in range(max(1, config.worker_count)):
+        asyncio.create_task(save_worker.run())
     print("Bot started.")
     await asyncio.Event().wait()
 

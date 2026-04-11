@@ -22,10 +22,12 @@ class Job:
 
 
 class SaveWorker:
-    def __init__(self, bot: Client, userbot: Client | None):
+    def __init__(self, bot: Client, userbot: Client | None, downloads_dir: str = "downloads"):
         self.bot = bot
         self.userbot = userbot
+        self.downloads_dir = downloads_dir
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
+        os.makedirs(self.downloads_dir, exist_ok=True)
 
     async def safe_call(self, coro):
         while True:
@@ -100,7 +102,9 @@ class SaveWorker:
                 return
 
             await self.update_status(status, 45, "Downloading media")
-            local_path = await self.safe_call(source_message.download())
+            local_path = await self.safe_call(
+                source_message.download(file_name=f"{self.downloads_dir}/")
+            )
 
             await self.update_status(status, 80, "Uploading protected file")
             await self.safe_call(
