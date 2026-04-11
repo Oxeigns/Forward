@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# Pyrogram's sync wrappers call asyncio.get_event_loop() during import time.
+# On Python 3.14, there is no implicit loop in the main thread, so we disable
+# sync mode and run the app purely with asyncio.
+os.environ.setdefault("PYROGRAM_DISABLE_SYNC", "1")
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
