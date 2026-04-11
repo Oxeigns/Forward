@@ -1,0 +1,22 @@
+{
+  "name": "telegram-restricted-content-saver",
+  "description": "Async Telegram restricted content saver bot with force-sub and queue",
+  "repository": "https://github.com/example/restricted-content-saver",
+  "keywords": ["telegram", "pyrogram", "mongo", "asyncio"],
+  "env": {
+    "API_ID": {"description": "Telegram API ID", "required": true},
+    "API_HASH": {"description": "Telegram API Hash", "required": true},
+    "BOT_TOKEN": {"description": "Bot token from @BotFather", "required": true},
+    "OWNER_ID": {"description": "Telegram numeric user ID for admin commands", "required": true},
+    "FSUB_ID": {
+      "description": "Force-sub channel username or ID (example: aghoris)",
+      "required": true,
+      "value": "aghoris"
+    },
+    "STRING_SESSION": {"description": "Pyrogram string session for the UserBot account", "required": false},
+    "MONGO_URL": {"description": "MongoDB connection string", "required": true}
+  },
+  "formation": {
+    "worker": {"quantity": 1, "size": "basic"}
+  }
+}
