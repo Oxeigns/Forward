@@ -14,7 +14,17 @@
       "required": true,
       "value": "aghoris"
     },
-    "MONGO_URL": {"description": "MongoDB URI", "required": true}
+    "MONGO_URL": {"description": "MongoDB URI", "required": true},
+    "DOWNLOADS_DIR": {
+      "description": "Temporary download directory used before upload",
+      "required": false,
+      "value": "downloads"
+    },
+    "WORKER_COUNT": {
+      "description": "Number of async queue workers",
+      "required": false,
+      "value": "2"
+    }
   },
   "formation": {
     "worker": {"quantity": 1, "size": "basic"}

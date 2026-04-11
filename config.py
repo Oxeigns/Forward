@@ -11,6 +11,8 @@ class Config:
     string_session: str = os.getenv("STRING_SESSION", "")
     force_sub_id: str = os.getenv("FORCE_SUB_ID", "aghoris")
     mongo_url: str = os.getenv("MONGO_URL", "")
+    downloads_dir: str = os.getenv("DOWNLOADS_DIR", "downloads")
+    worker_count: int = int(os.getenv("WORKER_COUNT", "2"))
 
 
 config = Config()
