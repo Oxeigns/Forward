@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import mimetypes
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from pyrogram import Client
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, InviteHashExpired, InviteHashInvalid, UserAlreadyParticipant
 from pyrogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message
 
-POST_REGEX = re.compile(
-    r"(?:https?://)?t\.me/(?:(?:c/(\d+)/(\d+))|(?:([A-Za-z0-9_]{4,})/(\d+)))"
-)
+PUBLIC_LINK_RE = re.compile(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{4,})/(\d+)$")
+PRIVATE_LINK_RE = re.compile(r"^(?:https?://)?t\.me/c/(\d+)/(\d+)$")
+INVITE_LINK_RE = re.compile(r"^(?:https?://)?t\.me/(?:\+|joinchat/)([\w-]+)$")
 
 
-@dataclass
+@dataclass(slots=True)
 class Job:
     user_id: int
     source_link: str
@@ -26,11 +23,15 @@ class Job:
     status_message_id: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ParsedLink:
-    link_type: str
-    chat_ref: str | int
+    is_private: bool
+    chat_id: int | str
     message_id: int
+
+
+class PrivateAccessNeeded(Exception):
+    pass
 
 
 class SaveWorker:
@@ -38,347 +39,243 @@ class SaveWorker:
         self,
         bot: Client,
         userbot: Client | None,
-        downloads_dir: str = "downloads",
-        job_timeout: int = 300,
-        max_retries: int = 3,
+        downloads_dir: str,
+        job_timeout: int,
+        max_retries: int,
     ):
         self.bot = bot
         self.userbot = userbot
-        self.downloads_dir = Path(downloads_dir)
         self.job_timeout = job_timeout
         self.max_retries = max_retries
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
+        self.downloads_dir = Path(downloads_dir)
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
+
+        self.pending_private: dict[int, Job] = {}
+        self.joined_invites: set[str] = set()
 
     async def safe_call(self, coro):
         while True:
             try:
                 return await coro
             except FloodWait as e:
-                await asyncio.sleep(e.value)
+                await asyncio.sleep(e.value + 1)
 
-    def parse_link(self, link: str) -> Optional[ParsedLink]:
-        match = POST_REGEX.search((link or "").strip())
-        if not match:
-            return None
+    def parse_link(self, link: str) -> ParsedLink | None:
+        raw = (link or "").strip()
+        pvt = PRIVATE_LINK_RE.match(raw)
+        if pvt:
+            cid, mid = pvt.groups()
+            return ParsedLink(True, int(f"-100{cid}"), int(mid))
 
-        private_chat, private_msg, public_chat, public_msg = match.groups()
+        pub = PUBLIC_LINK_RE.match(raw)
+        if pub:
+            username, mid = pub.groups()
+            return ParsedLink(False, username, int(mid))
 
-        if private_chat and private_msg:
-            return ParsedLink(
-                link_type="private",
-                chat_ref=int(f"-100{private_chat}"),
-                message_id=int(private_msg),
-            )
-
-        return ParsedLink(
-            link_type="public",
-            chat_ref=str(public_chat),
-            message_id=int(public_msg),
-        )
+        return None
 
     @staticmethod
-    def progress_line(percent: int) -> str:
-        percent = max(0, min(100, percent))
-        filled = percent // 10
-        return f"<code>[{'▰' * filled}{'▱' * (10 - filled)}] {percent}%</code>"
+    def parse_invite(link: str) -> str | None:
+        m = INVITE_LINK_RE.match((link or "").strip())
+        if not m:
+            return None
+        return f"https://t.me/+{m.group(1)}"
 
-    async def progress_update(self, status_message: Message, percent: int, state: str):
-        icon = {
+    async def join_invite(self, invite_link: str) -> bool:
+        if not self.userbot:
+            return False
+        if invite_link in self.joined_invites:
+            return True
+
+        try:
+            await self.safe_call(self.userbot.join_chat(invite_link))
+            self.joined_invites.add(invite_link)
+            return True
+        except UserAlreadyParticipant:
+            self.joined_invites.add(invite_link)
+            return True
+        except (InviteHashExpired, InviteHashInvalid):
+            return False
+        except Exception:
+            return False
+
+    async def update_status(self, job: Job, percent: int, state: str, extra: str = ""):
+        filled = max(0, min(10, percent // 10))
+        bar = f"[{'▰' * filled}{'▱' * (10 - filled)}] {percent}%"
+        icons = {
             "queued": "🕓",
             "resolving": "🔎",
             "downloading": "📥",
             "uploading": "📤",
             "completed": "✅",
             "failed": "❌",
-        }.get(state.lower(), "⚙️")
-
+        }
         text = (
-            "<b>Restricted Message Saver</b>\n"
-            f"{self.progress_line(percent)}\n"
-            f"<i>{icon} {state}</i>"
+            "<b>RESTRICTED 🚫 MESSAGE SAVER 💾</b>\n"
+            f"<code>{bar}</code>\n"
+            f"<i>{icons.get(state, '⚙️')} {state}</i>"
         )
+        if extra:
+            text += f"\n<code>{extra}</code>"
 
-        try:
-            await self.safe_call(
-                status_message.edit_text(
-                    text,
-                    disable_web_page_preview=True,
-                )
-            )
-        except Exception:
-            pass
-
-    async def set_error(self, status_message: Message, error_text: str):
-        try:
-            await self.safe_call(
-                status_message.edit_text(
-                    f"<b>Restricted Message Saver</b>\n<code>[ ERROR ] {error_text[:180]}</code>",
-                    disable_web_page_preview=True,
-                )
-            )
-        except Exception:
-            pass
-
-    def _guess_media_kind(self, message: Message) -> str:
-        if message.photo:
-            return "photo"
-        if message.video:
-            return "video"
-        if message.animation:
-            return "animation"
-        if message.audio:
-            return "audio"
-        if message.voice:
-            return "voice"
-        if message.video_note:
-            return "video_note"
-        if message.sticker:
-            return "sticker"
-        if message.document:
-            return "document"
-        return "unknown"
-
-    async def _download_with_retry(self, message: Message) -> Optional[str]:
-        last_error = None
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                return await self.safe_call(
-                    message.download(file_name=str(self.downloads_dir) + "/")
-                )
-            except Exception as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    await asyncio.sleep(1.5 * attempt)
-
-        if last_error:
-            raise last_error
-        return None
-
-    async def _send_single_media(self, user_id: int, source_message: Message, file_path: str):
-        caption = source_message.caption or ""
-        media_kind = self._guess_media_kind(source_message)
-
-        if media_kind == "photo":
-            return await self.safe_call(
-                self.bot.send_photo(
-                    chat_id=user_id,
-                    photo=file_path,
-                    caption=caption,
-                    protect_content=True,
-                )
-            )
-
-        if media_kind in {"video", "animation"}:
-            return await self.safe_call(
-                self.bot.send_video(
-                    chat_id=user_id,
-                    video=file_path,
-                    caption=caption,
-                    protect_content=True,
-                )
-            )
-
-        if media_kind == "audio":
-            return await self.safe_call(
-                self.bot.send_audio(
-                    chat_id=user_id,
-                    audio=file_path,
-                    caption=caption,
-                    protect_content=True,
-                )
-            )
-
-        if media_kind == "voice":
-            return await self.safe_call(
-                self.bot.send_voice(
-                    chat_id=user_id,
-                    voice=file_path,
-                    protect_content=True,
-                )
-            )
-
-        if media_kind == "video_note":
-            return await self.safe_call(
-                self.bot.send_video_note(
-                    chat_id=user_id,
-                    video_note=file_path,
-                    protect_content=True,
-                )
-            )
-
-        if media_kind == "sticker":
-            return await self.safe_call(
-                self.bot.send_sticker(
-                    chat_id=user_id,
-                    sticker=file_path,
-                    protect_content=True,
-                )
-            )
-
-        return await self.safe_call(
-            self.bot.send_document(
-                chat_id=user_id,
-                document=file_path,
-                caption=caption or "Saved securely via bot.",
-                protect_content=True,
-            )
-        )
-
-    async def _copy_text_message(self, job: Job, source_message: Message):
-        text = source_message.text or source_message.caption
-        if not text:
-            text = "Empty message."
         await self.safe_call(
-            self.bot.send_message(
-                chat_id=job.user_id,
+            self.bot.edit_message_text(
+                chat_id=job.status_chat_id,
+                message_id=job.status_message_id,
                 text=text,
-                disable_web_page_preview=False,
-                protect_content=True,
+                disable_web_page_preview=True,
             )
         )
 
-    async def _get_source_message(self, parsed: ParsedLink) -> Optional[Message]:
-        if parsed.link_type == "public":
-            return await self.safe_call(self.bot.get_messages(parsed.chat_ref, parsed.message_id))
+    async def _fetch_source(self, parsed: ParsedLink) -> Message | None:
+        client = self.userbot if parsed.is_private else self.bot
+        if client is None:
+            raise PrivateAccessNeeded
+        return await self.safe_call(client.get_messages(parsed.chat_id, parsed.message_id))
 
-        if self.userbot is None:
-            return None
-
-        return await self.safe_call(self.userbot.get_messages(parsed.chat_ref, parsed.message_id))
-
-    async def _get_media_group_messages(self, parsed: ParsedLink, source_message: Message) -> list[Message]:
-        media_group_id = getattr(source_message, "media_group_id", None)
-        if not media_group_id:
-            return [source_message]
-
-        client = self.userbot if parsed.link_type == "private" and self.userbot else self.bot
-        messages = await self.safe_call(client.get_media_group(source_message.chat.id, source_message.id))
-        return messages or [source_message]
-
-    def _build_input_media(self, source_message: Message, file_path: str, caption: str = ""):
-        if source_message.photo:
-            return InputMediaPhoto(media=file_path, caption=caption)
-        if source_message.video or source_message.animation:
-            return InputMediaVideo(media=file_path, caption=caption)
-        if source_message.audio:
-            return InputMediaAudio(media=file_path, caption=caption)
-        return InputMediaDocument(media=file_path, caption=caption)
-
-    async def _send_media_group(self, user_id: int, messages: list[Message]):
-        file_paths: list[str] = []
+    async def _send_text(self, job: Job, msg: Message):
         try:
-            media_items = []
-            for index, msg in enumerate(messages[:10]):
-                downloaded = await self._download_with_retry(msg)
-                if not downloaded:
-                    raise RuntimeError("Failed to download one of the media group items.")
-
-                file_paths.append(downloaded)
-                caption = msg.caption or ""
-                if index != 0:
-                    caption = ""
-                media_items.append(self._build_input_media(msg, downloaded, caption))
-
             await self.safe_call(
-                self.bot.send_media_group(
-                    chat_id=user_id,
-                    media=media_items,
+                self.bot.copy_message(
+                    chat_id=job.user_id,
+                    from_chat_id=msg.chat.id,
+                    message_id=msg.id,
                     protect_content=True,
                 )
             )
+        except Exception:
+            body = msg.text or msg.caption or "(empty message)"
+            await self.safe_call(self.bot.send_message(job.user_id, body, protect_content=True))
+
+    async def _download(self, msg: Message) -> str:
+        path = await self.safe_call(msg.download(file_name=f"{self.downloads_dir}/"))
+        if not path:
+            raise RuntimeError("Download returned empty path")
+        return path
+
+    async def _send_single_media(self, user_id: int, msg: Message, local_path: str):
+        caption = msg.caption or ""
+        if msg.photo:
+            await self.safe_call(self.bot.send_photo(user_id, local_path, caption=caption, protect_content=True))
+        elif msg.video:
+            await self.safe_call(self.bot.send_video(user_id, local_path, caption=caption, protect_content=True))
+        elif msg.audio:
+            await self.safe_call(self.bot.send_audio(user_id, local_path, caption=caption, protect_content=True))
+        elif msg.voice:
+            await self.safe_call(self.bot.send_voice(user_id, local_path, protect_content=True))
+        elif msg.sticker:
+            await self.safe_call(self.bot.send_sticker(user_id, local_path, protect_content=True))
+        else:
+            await self.safe_call(self.bot.send_document(user_id, local_path, caption=caption, protect_content=True))
+
+    def _build_media(self, msg: Message, local_path: str, caption: str):
+        if msg.photo:
+            return InputMediaPhoto(local_path, caption=caption)
+        if msg.video:
+            return InputMediaVideo(local_path, caption=caption)
+        if msg.audio:
+            return InputMediaAudio(local_path, caption=caption)
+        return InputMediaDocument(local_path, caption=caption)
+
+    async def _send_media_group(self, job: Job, messages: list[Message]):
+        local_files: list[str] = []
+        try:
+            items = []
+            for idx, msg in enumerate(messages[:10]):
+                local = await self._download(msg)
+                local_files.append(local)
+                items.append(self._build_media(msg, local, msg.caption or "" if idx == 0 else ""))
+            await self.safe_call(self.bot.send_media_group(job.user_id, items, protect_content=True))
         finally:
-            for path in file_paths:
-                try:
-                    if path and os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
+            for f in local_files:
+                if os.path.exists(f):
+                    os.remove(f)
 
-    async def process_job(self, job: Job):
-        status = await self.safe_call(
-            self.bot.get_messages(job.status_chat_id, job.status_message_id)
-        )
-        if not status:
-            return
-
+    async def _process_once(self, job: Job):
         parsed = self.parse_link(job.source_link)
         if not parsed:
-            await self.set_error(status, "Invalid Telegram post link.")
+            await self.update_status(job, 100, "failed", "Invalid link")
             return
 
+        await self.update_status(job, 20, "resolving")
+        source = await self._fetch_source(parsed)
+        if not source or getattr(source, "empty", False):
+            raise RuntimeError("Message not found")
+
+        if getattr(source, "has_protected_content", False):
+            await self.update_status(job, 100, "failed", "[ POLICY ] Protected content cannot be saved")
+            return
+
+        if not source.media:
+            await self.update_status(job, 80, "uploading")
+            await self._send_text(job, source)
+            await self.update_status(job, 100, "completed")
+            return
+
+        await self.update_status(job, 45, "downloading")
+        client = self.userbot if parsed.is_private and self.userbot else self.bot
+        if source.media_group_id and client:
+            group = await self.safe_call(client.get_media_group(source.chat.id, source.id))
+        else:
+            group = [source]
+
+        if len(group) > 1:
+            await self._send_media_group(job, group)
+            await self.update_status(job, 100, "completed")
+            return
+
+        local = await self._download(source)
         try:
-            await self.progress_update(status, 10, "resolving")
-            source_message = await self._get_source_message(parsed)
+            await self.update_status(job, 80, "uploading")
+            await self._send_single_media(job.user_id, source, local)
+        finally:
+            if os.path.exists(local):
+                os.remove(local)
 
-            if not source_message:
-                await self.set_error(status, "Message not accessible.")
-                return
+        await self.update_status(job, 100, "completed")
 
-            if getattr(source_message, "empty", False):
-                await self.set_error(status, "Message not found.")
-                return
-
-            if getattr(source_message, "has_protected_content", False):
-                await self.set_error(status, "Protected content cannot be saved.")
-                return
-
-            if not source_message.media:
-                await self.progress_update(status, 70, "uploading")
-                await self._copy_text_message(job, source_message)
-                await self.progress_update(status, 100, "completed")
-                return
-
-            group_messages = await self._get_media_group_messages(parsed, source_message)
-
-            if len(group_messages) > 1:
-                await self.progress_update(status, 35, "downloading")
-                await self._send_media_group(job.user_id, group_messages)
-                await self.progress_update(status, 100, "completed")
-                return
-
-            await self.progress_update(status, 40, "downloading")
-            local_path = await self._download_with_retry(source_message)
-
-            if not local_path:
-                await self.set_error(status, "Download failed.")
-                return
-
+    async def process_job(self, job: Job):
+        for attempt in range(1, self.max_retries + 1):
             try:
-                await self.progress_update(status, 82, "uploading")
-                sent = await self._send_single_media(job.user_id, source_message, local_path)
-                if not sent:
-                    await self.set_error(status, "Upload failed.")
+                await self._process_once(job)
+                return
+            except PrivateAccessNeeded:
+                self.pending_private[job.user_id] = job
+                await self.update_status(
+                    job,
+                    100,
+                    "failed",
+                    "Private chat access required. Send invite link: t.me/+xxxx",
+                )
+                return
+            except Exception as e:
+                if attempt == self.max_retries:
+                    await self.update_status(job, 100, "failed", str(e)[:140])
                     return
-            finally:
-                try:
-                    if os.path.exists(local_path):
-                        os.remove(local_path)
-                except Exception:
-                    pass
+                await asyncio.sleep(attempt)
 
-            await self.progress_update(status, 100, "completed")
-
-        except Exception as e:
-            await self.set_error(status, str(e))
-
-    async def run(self):
+    async def run_worker(self, worker_name: str):
         while True:
             job = await self.queue.get()
             try:
                 await asyncio.wait_for(self.process_job(job), timeout=self.job_timeout)
             except asyncio.TimeoutError:
-                status = await self.safe_call(
-                    self.bot.get_messages(job.status_chat_id, job.status_message_id)
-                )
-                if status:
-                    await self.set_error(status, "Job timed out.")
+                await self.update_status(job, 100, "failed", "Job timeout (300s)")
             except Exception as e:
-                status = await self.safe_call(
-                    self.bot.get_messages(job.status_chat_id, job.status_message_id)
-                )
-                if status:
-                    await self.set_error(status, f"Unhandled error: {e}")
+                await self.update_status(job, 100, "failed", f"Worker error: {e}")
             finally:
                 self.queue.task_done()
+
+    async def requeue_after_invite(self, user_id: int, invite_link: str) -> tuple[bool, str]:
+        pending = self.pending_private.get(user_id)
+        if not pending:
+            return False, "No pending private job found. Send a private t.me/c/... link first."
+
+        joined = await self.join_invite(invite_link)
+        if not joined:
+            return False, "Invite link invalid/expired or join failed."
+
+        self.pending_private.pop(user_id, None)
+        await self.queue.put(pending)
+        return True, "Invite accepted. Job re-queued for retry."

@@ -6,10 +6,10 @@ import signal
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# Disable Pyrogram sync wrappers before import
 os.environ["PYROGRAM_DISABLE_SYNC"] = "1"
 
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 from config import config
@@ -20,7 +20,7 @@ from plugins.fsub import (
     safe_call,
     start_menu,
 )
-from plugins.saver import Job, SaveWorker
+from plugins.saver import INVITE_LINK_RE, Job, SaveWorker
 
 try:
     import uvloop
@@ -29,49 +29,37 @@ except Exception:
 
 
 bot = Client(
-    "forward_saver_bot",
+    "restricted_message_saver_bot",
     api_id=config.api_id,
     api_hash=config.api_hash,
     bot_token=config.bot_token,
+    parse_mode=ParseMode.HTML,
 )
 
 userbot = None
 if config.string_session:
     userbot = Client(
-        "forward_saver_userbot",
+        "restricted_message_saver_userbot",
         api_id=config.api_id,
         api_hash=config.api_hash,
         session_string=config.string_session,
     )
 
 mongo = AsyncIOMotorClient(config.mongo_url)
-db = mongo["forward_saver"]
+db = mongo["restricted_message_saver"]
 users_col = db["users"]
 
 save_worker = SaveWorker(
     bot=bot,
     userbot=userbot,
     downloads_dir=config.downloads_dir,
-    job_timeout=getattr(config, "job_timeout", 300),
-    max_retries=getattr(config, "max_retries", 3),
+    job_timeout=config.job_timeout,
+    max_retries=config.max_retries,
 )
 
 
 async def add_user(user_id: int):
-    await users_col.update_one(
-        {"_id": user_id},
-        {"$set": {"_id": user_id}},
-        upsert=True,
-    )
-
-
-async def worker_loop():
-    while True:
-        try:
-            await save_worker.run()
-        except Exception as e:
-            print(f"[WORKER ERROR] {e}")
-            await asyncio.sleep(2)
+    await users_col.update_one({"_id": user_id}, {"$set": {"_id": user_id}}, upsert=True)
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -80,89 +68,42 @@ async def start_handler(_, message: Message):
 
     if not await is_user_verified(bot, config.force_sub_id, message.from_user.id):
         await message.reply_text(
-            "`[ ACCESS REQUIRED ] Join updates channel, then verify.`",
+            "<b>Access Locked</b>\n<i>Join required channel, then verify access.</i>",
             reply_markup=premium_fsub_markup(config.force_sub_id),
-            disable_web_page_preview=True,
         )
         return
 
-    await message.reply_text(
-        "<b>𝑴𝒐𝒅𝒆 𝑺𝒘𝒊𝒕𝒄𝒉</b>\n<i>Loading premium dashboard…</i>"
-    )
     await start_menu(message, config.force_sub_id)
 
 
-@bot.on_callback_query(filters.regex("^verify$"))
-async def verify_callback(_, query):
+@bot.on_callback_query(filters.regex(r"^verify$"))
+async def verify_handler(_, query):
     if await is_user_verified(bot, config.force_sub_id, query.from_user.id):
         await safe_call(
             query.message.edit_text(
-                "`[ VERIFIED ] Access granted.`",
-                reply_markup=premium_dashboard_markup(),
+                "<b>Verification complete ✅</b>\n<i>Dashboard unlocked.</i>",
+                reply_markup=premium_dashboard_markup(config.force_sub_id),
             )
         )
+        await query.answer("Access verified", show_alert=False)
     else:
-        await query.answer("Join channel first.", show_alert=True)
+        await query.answer("You still need to join the channel.", show_alert=True)
 
 
-@bot.on_callback_query(filters.regex("^save_help$"))
-async def save_help_callback(_, query):
-    await query.answer("Send any Telegram message link.", show_alert=True)
+@bot.on_callback_query(filters.regex(r"^save_help$"))
+async def save_help_handler(_, query):
+    await query.answer("Send t.me/username/id or t.me/c/id/id link.", show_alert=True)
 
 
-@bot.on_callback_query(filters.regex("^my_profile$"))
-async def profile_callback(_, query):
-    pending_count = save_worker.queue.qsize()
-    await query.answer(f"Queued jobs: {pending_count}", show_alert=True)
+@bot.on_callback_query(filters.regex(r"^my_profile$"))
+async def profile_handler(_, query):
+    queued = save_worker.queue.qsize()
+    await query.answer(f"Queue size: {queued}", show_alert=True)
 
 
-@bot.on_callback_query(filters.regex("^clear_panel$"))
-async def clear_panel_callback(_, query):
-    await safe_call(
-        query.message.edit_text(
-            "<b>𝑷𝒂𝒏𝒆𝒍 𝑪𝒍𝒆𝒂𝒓𝒆𝒅</b>\n<i>Use /start to relaunch dashboard.</i>"
-        )
-    )
-
-
-@bot.on_message(
-    filters.private
-    & filters.text
-    & ~filters.command(["start", "stats", "broadcast", "clearqueue"])
-)
-async def save_incoming(_, message: Message):
-    user_id = message.from_user.id
-
-    await add_user(user_id)
-
-    if not await is_user_verified(bot, config.force_sub_id, user_id):
-        await message.reply_text(
-            "`[ ACCESS DENIED ] Join channel and verify.`",
-            reply_markup=premium_fsub_markup(config.force_sub_id),
-        )
-        return
-
-    parsed = save_worker.parse_link(message.text or "")
-    if not parsed:
-        await message.reply_text(
-            "`[ ERROR ] Send a valid Telegram post link (t.me/.../...).`"
-        )
-        return
-
-    status = await message.reply_text(
-        "<b>Restricted Message Saver</b>\n"
-        "<code>[▱▱▱▱▱▱▱▱▱▱] 0%</code>\n"
-        "<i>🕓 queued</i>"
-    )
-
-    await save_worker.queue.put(
-        Job(
-            user_id=user_id,
-            source_link=message.text.strip(),
-            status_chat_id=status.chat.id,
-            status_message_id=status.id,
-        )
-    )
+@bot.on_callback_query(filters.regex(r"^clear_panel$"))
+async def clear_panel_handler(_, query):
+    await safe_call(query.message.edit_text("<b>Panel cleared.</b>\nUse /start to open again."))
 
 
 @bot.on_message(filters.command("stats") & filters.private)
@@ -171,12 +112,11 @@ async def stats_handler(_, message: Message):
         return
 
     total_users = await users_col.count_documents({})
-    queue_count = save_worker.queue.qsize()
-
+    queue_size = save_worker.queue.qsize()
     await message.reply_text(
-        "`[ BOT STATS ]`\n"
-        f"`users: {total_users}`\n"
-        f"`queued_jobs: {queue_count}`"
+        "<b>Bot Stats</b>\n"
+        f"<code>Total users:</code> {total_users}\n"
+        f"<code>Queue size:</code> {queue_size}"
     )
 
 
@@ -185,16 +125,16 @@ async def clear_queue_handler(_, message: Message):
     if message.from_user.id != config.owner_id:
         return
 
-    cleared = 0
+    removed = 0
     while not save_worker.queue.empty():
         try:
             save_worker.queue.get_nowait()
             save_worker.queue.task_done()
-            cleared += 1
+            removed += 1
         except asyncio.QueueEmpty:
             break
 
-    await message.reply_text(f"`[ QUEUE CLEARED ] removed={cleared}`")
+    await message.reply_text(f"<b>Queue cleared.</b> Removed: <code>{removed}</code>")
 
 
 @bot.on_message(filters.command("broadcast") & filters.private)
@@ -202,69 +142,106 @@ async def broadcast_handler(_, message: Message):
     if message.from_user.id != config.owner_id:
         return
 
-    if not message.reply_to_message:
-        await message.reply_text("`[ ERROR ] Reply to any message with /broadcast.`")
+    payload = None
+    if message.reply_to_message:
+        payload = message.reply_to_message
+    elif len(message.command) > 1:
+        payload = " ".join(message.command[1:]).strip()
+
+    if payload is None:
+        await message.reply_text("Reply to a message with /broadcast OR use /broadcast your_text")
         return
 
-    sent = 0
-    failed = 0
-
+    sent, failed = 0, 0
     async for user in users_col.find({}, {"_id": 1}):
         try:
-            result = await safe_call(message.reply_to_message.copy(user["_id"]))
-            if result:
-                sent += 1
+            if isinstance(payload, str):
+                await safe_call(bot.send_message(user["_id"], payload))
             else:
-                failed += 1
+                await safe_call(payload.copy(user["_id"]))
+            sent += 1
         except Exception:
             failed += 1
+    await message.reply_text(f"<b>Broadcast done.</b>\nSent: <code>{sent}</code>\nFailed: <code>{failed}</code>")
 
-        if (sent + failed) % 25 == 0:
-            await asyncio.sleep(1)
 
-    await message.reply_text(f"`[ BROADCAST ] sent={sent} failed={failed}`")
+@bot.on_message(filters.private & filters.text & ~filters.command(["start", "stats", "broadcast", "clearqueue"]))
+async def inbox_handler(_, message: Message):
+    user_id = message.from_user.id
+    await add_user(user_id)
+
+    if not await is_user_verified(bot, config.force_sub_id, user_id):
+        await message.reply_text(
+            "<b>Access denied</b>\nJoin channel and tap verify.",
+            reply_markup=premium_fsub_markup(config.force_sub_id),
+        )
+        return
+
+    text = (message.text or "").strip()
+
+    if INVITE_LINK_RE.match(text):
+        ok, info = await save_worker.requeue_after_invite(user_id, text)
+        await message.reply_text(f"<code>{info}</code>")
+        return
+
+    parsed = save_worker.parse_link(text)
+    if not parsed:
+        await message.reply_text("Send a valid Telegram message link.")
+        return
+
+    queue_position = save_worker.queue.qsize() + 1
+    status = await message.reply_text(
+        "<b>RESTRICTED 🚫 MESSAGE SAVER 💾</b>\n"
+        "<code>[▱▱▱▱▱▱▱▱▱▱] 0%</code>\n"
+        f"<i>🕓 queued</i>\n<code>Queue position: {queue_position}</code>"
+    )
+    await save_worker.queue.put(
+        Job(
+            user_id=user_id,
+            source_link=text,
+            status_chat_id=status.chat.id,
+            status_message_id=status.id,
+        )
+    )
 
 
 async def main():
-    if uvloop is not None:
+    if uvloop:
         uvloop.install()
 
+    await db.command("ping")
+
     await bot.start()
-    if userbot is not None:
+    if userbot:
         await userbot.start()
 
-    worker_tasks = [
-        asyncio.create_task(worker_loop())
-        for _ in range(max(1, config.worker_count))
-    ]
-
-    print("Bot started.")
-
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def _stop():
+    def _trigger_shutdown():
         stop_event.set()
 
-    try:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, _stop)
-            except NotImplementedError:
-                pass
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _trigger_shutdown)
+        except NotImplementedError:
+            pass
 
-        await stop_event.wait()
-    finally:
-        for task in worker_tasks:
-            task.cancel()
+    workers = [
+        asyncio.create_task(save_worker.run_worker(f"worker-{i + 1}"))
+        for i in range(max(1, config.worker_count))
+    ]
 
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
+    await stop_event.wait()
 
-        if userbot is not None:
-            await userbot.stop()
+    for task in workers:
+        task.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
 
-        await bot.stop()
-        mongo.close()
+    if userbot:
+        await userbot.stop()
+    await bot.stop()
+    mongo.close()
 
 
 if __name__ == "__main__":
