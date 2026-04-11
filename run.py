@@ -1,14 +1,18 @@
 import os
 
-# 🔥 MUST BE FIRST LINE
+# Must be set before importing pyrogram anywhere.
 os.environ["PYROGRAM_DISABLE_SYNC"] = "1"
 
-# optional but recommended
-import uvloop
-uvloop.install()
+try:
+    import uvloop
+
+    uvloop.install()
+except Exception:
+    pass
 
 import asyncio
-asyncio.set_event_loop(asyncio.new_event_loop())
-
-# NOW import your bot
 import main
+
+
+if __name__ == "__main__":
+    asyncio.run(main.main())
