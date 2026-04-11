@@ -5,10 +5,17 @@ import os
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
+# Python 3.14 no longer creates an implicit loop for the main thread.
+# Pyrogram touches asyncio.get_event_loop() during import, so ensure one exists.
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 # Pyrogram's sync wrappers call asyncio.get_event_loop() during import time.
 # On Python 3.14, there is no implicit loop in the main thread, so we disable
 # sync mode and run the app purely with asyncio.
-os.environ.setdefault("PYROGRAM_DISABLE_SYNC", "1")
+os.environ["PYROGRAM_DISABLE_SYNC"] = "1"
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
