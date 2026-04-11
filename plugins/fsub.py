@@ -8,6 +8,8 @@ from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import ChatAdminRequired, FloodWait, UserNotParticipant
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+SUPPORTED_STYLES = {"primary", "secondary", "success", "danger"}
+
 
 async def safe_call(coro):
     while True:
@@ -29,10 +31,10 @@ def styled_button(
     if url:
         kwargs["url"] = url
 
-    if style:
+    if style and style in SUPPORTED_STYLES:
         try:
             return InlineKeyboardButton(text=text, style=style, **kwargs)
-        except TypeError:
+        except Exception:
             pass
 
     return InlineKeyboardButton(text=text, **kwargs)

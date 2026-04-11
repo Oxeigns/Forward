@@ -185,7 +185,7 @@ class SaveWorker:
             for idx, msg in enumerate(messages[:10]):
                 local = await self._download(msg)
                 local_files.append(local)
-                items.append(self._build_media(msg, local, msg.caption or "" if idx == 0 else ""))
+                items.append(self._build_media(msg, local, (msg.caption or "") if idx == 0 else ""))
             await self.safe_call(self.bot.send_media_group(job.user_id, items, protect_content=True))
         finally:
             for f in local_files:
