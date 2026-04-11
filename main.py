@@ -7,7 +7,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from config import config
-from plugins.fsub import is_user_verified, premium_dashboard_markup, premium_fsub_markup, safe_call
+from plugins.fsub import is_user_verified, premium_dashboard_markup, premium_fsub_markup, safe_call, start_menu
 from plugins.saver import Job, SaveWorker
 
 try:
@@ -55,9 +55,9 @@ async def start_handler(_, message: Message):
         return
 
     await message.reply_text(
-        "`[ READY ] Send a Telegram post link to save content to DM.`",
-        reply_markup=premium_dashboard_markup(),
+        "<b>𝑴𝒐𝒅𝒆 𝑺𝒘𝒊𝒕𝒄𝒉</b>\n<i>Loading premium dashboard…</i>",
     )
+    await start_menu(message, config.force_sub_id)
 
 
 @bot.on_callback_query(filters.regex("^verify$"))
@@ -82,6 +82,15 @@ async def save_help_callback(_, query):
 async def profile_callback(_, query):
     pending_count = save_worker.queue.qsize()
     await query.answer(f"Queued jobs: {pending_count}", show_alert=True)
+
+
+@bot.on_callback_query(filters.regex("^clear_panel$"))
+async def clear_panel_callback(_, query):
+    await safe_call(
+        query.message.edit_text(
+            "<b>𝑷𝒂𝒏𝒆𝒍 𝑪𝒍𝒆𝒂𝒓𝒆𝒅</b>\n<i>Use /start to relaunch dashboard.</i>"
+        )
+    )
 
 
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "stats", "broadcast"]))
