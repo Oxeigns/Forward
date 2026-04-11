@@ -8,8 +8,8 @@ class Config:
     api_hash: str = os.getenv("API_HASH", "")
     bot_token: str = os.getenv("BOT_TOKEN", "")
     owner_id: int = int(os.getenv("OWNER_ID", "0"))
-    fsub_id: str = os.getenv("FSUB_ID", "aghoris")
     string_session: str = os.getenv("STRING_SESSION", "")
+    force_sub_id: str = os.getenv("FORCE_SUB_ID", "aghoris")
     mongo_url: str = os.getenv("MONGO_URL", "")
 
 
