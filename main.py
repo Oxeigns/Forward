@@ -5,9 +5,6 @@ import os
 import signal
 
 from motor.motor_asyncio import AsyncIOMotorClient
-
-os.environ["PYROGRAM_DISABLE_SYNC"] = "1"
-
 try:
     import uvloop
 except Exception:
