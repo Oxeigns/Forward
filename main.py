@@ -27,6 +27,9 @@ try:
 except Exception:
     uvloop = None
 
+if uvloop:
+    uvloop.install()
+
 
 bot = Client(
     "restricted_message_saver_bot",
@@ -206,9 +209,6 @@ async def inbox_handler(_, message: Message):
 
 
 async def main():
-    if uvloop:
-        uvloop.install()
-
     await db.command("ping")
 
     await bot.start()
