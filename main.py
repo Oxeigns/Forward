@@ -2,33 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# Python 3.14 no longer creates an implicit loop for the main thread.
-# Pyrogram touches asyncio.get_event_loop() during import, so ensure one exists.
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-# Pyrogram's sync wrappers call asyncio.get_event_loop() during import time.
-# On Python 3.14, there is no implicit loop in the main thread, so we disable
-# sync mode and run the app purely with asyncio.
+# Disable Pyrogram sync BEFORE import
 os.environ["PYROGRAM_DISABLE_SYNC"] = "1"
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from config import config
-from plugins.fsub import is_user_verified, premium_dashboard_markup, premium_fsub_markup, safe_call, start_menu
+from plugins.fsub import (
+    is_user_verified,
+    premium_dashboard_markup,
+    premium_fsub_markup,
+    safe_call,
+    start_menu,
+)
 from plugins.saver import Job, SaveWorker
 
 try:
     import uvloop
-except Exception:  # pragma: no cover
+except Exception:
     uvloop = None
 
+
+# ------------------ CLIENTS ------------------ #
 bot = Client(
     "forward_saver_bot",
     api_id=config.api_id,
@@ -38,38 +38,64 @@ bot = Client(
 
 userbot = None
 if config.string_session:
-    userbot = Client(
-        "forward_saver_userbot",
-        api_id=config.api_id,
-        api_hash=config.api_hash,
-        session_string=config.string_session,
-    )
+    try:
+        userbot = Client(
+            "forward_saver_userbot",
+            api_id=config.api_id,
+            api_hash=config.api_hash,
+            session_string=config.string_session,
+        )
+    except Exception as e:
+        print(f"[USERBOT ERROR] {e}")
+        userbot = None
 
+
+# ------------------ DB ------------------ #
 mongo = AsyncIOMotorClient(config.mongo_url)
 db = mongo["forward_saver"]
 users_col = db["users"]
 
-save_worker = SaveWorker(bot=bot, userbot=userbot, downloads_dir=config.downloads_dir)
+
+# ------------------ WORKER ------------------ #
+save_worker = SaveWorker(
+    bot=bot,
+    userbot=userbot,
+    downloads_dir=config.downloads_dir,
+)
 
 
+async def worker_loop():
+    """Safe worker loop (auto-restart on crash)"""
+    while True:
+        try:
+            await save_worker.run()
+        except Exception as e:
+            print(f"[WORKER CRASH] {e}")
+            await asyncio.sleep(2)
+
+
+# ------------------ HELPERS ------------------ #
 async def add_user(user_id: int):
-    await users_col.update_one({"_id": user_id}, {"$set": {"_id": user_id}}, upsert=True)
+    await users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"_id": user_id}},
+        upsert=True,
+    )
 
 
+# ------------------ HANDLERS ------------------ #
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(_, message: Message):
     await add_user(message.from_user.id)
 
     if not await is_user_verified(bot, config.force_sub_id, message.from_user.id):
-        await message.reply_text(
-            "`[ ACCESS REQUIRED ] Join updates channel, then verify.`",
+        return await message.reply_text(
+            "`[ ACCESS REQUIRED ] Join channel, then verify.`",
             reply_markup=premium_fsub_markup(config.force_sub_id),
-            disable_web_page_preview=True,
         )
-        return
 
     await message.reply_text(
-        "<b>𝑴𝒐𝒅𝒆 𝑺𝒘𝒊𝒕𝒄𝒉</b>\n<i>Loading premium dashboard…</i>",
+        "<b>Mode Switch</b>\n<i>Loading dashboard...</i>"
     )
     await start_menu(message, config.force_sub_id)
 
@@ -87,41 +113,25 @@ async def verify_callback(_, query):
         await query.answer("Join channel first.", show_alert=True)
 
 
-@bot.on_callback_query(filters.regex("^save_help$"))
-async def save_help_callback(_, query):
-    await query.answer("Send any Telegram message link.", show_alert=True)
-
-
-@bot.on_callback_query(filters.regex("^my_profile$"))
-async def profile_callback(_, query):
-    pending_count = save_worker.queue.qsize()
-    await query.answer(f"Queued jobs: {pending_count}", show_alert=True)
-
-
-@bot.on_callback_query(filters.regex("^clear_panel$"))
-async def clear_panel_callback(_, query):
-    await safe_call(
-        query.message.edit_text(
-            "<b>𝑷𝒂𝒏𝒆𝒍 𝑪𝒍𝒆𝒂𝒓𝒆𝒅</b>\n<i>Use /start to relaunch dashboard.</i>"
-        )
-    )
-
-
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "stats", "broadcast"]))
 async def save_incoming(_, message: Message):
     user_id = message.from_user.id
+
     if not await is_user_verified(bot, config.force_sub_id, user_id):
-        await message.reply_text(
-            "`[ ACCESS DENIED ] Join channel and verify.`",
+        return await message.reply_text(
+            "`[ ACCESS DENIED ] Join & verify.`",
             reply_markup=premium_fsub_markup(config.force_sub_id),
         )
-        return
 
     if not save_worker.parse_link(message.text or ""):
-        await message.reply_text("`[ ERROR ] Send a valid Telegram post link (t.me/.../...).`")
-        return
+        return await message.reply_text(
+            "`[ ERROR ] Send valid Telegram link.`"
+        )
 
-    status = await message.reply_text("`[ QUEUED ]`\n`▱▱▱▱▱▱▱▱▱▱ [0%]`")
+    status = await message.reply_text(
+        "`[ QUEUED ]`\n▱▱▱▱▱▱▱▱▱▱ 0%"
+    )
+
     await save_worker.queue.put(
         Job(
             user_id=user_id,
@@ -139,65 +149,46 @@ async def stats_handler(_, message: Message):
 
     total_users = await users_col.count_documents({})
     queue_count = save_worker.queue.qsize()
+
     await message.reply_text(
-        "`[ BOT STATS ]`\n"
         f"`users: {total_users}`\n"
-        f"`queued_jobs: {queue_count}`"
+        f"`queued: {queue_count}`"
     )
 
 
-@bot.on_message(filters.command("clearqueue") & filters.private)
-async def clear_queue_handler(_, message: Message):
-    if message.from_user.id != config.owner_id:
-        return
-
-    cleared = 0
-    while not save_worker.queue.empty():
-        try:
-            save_worker.queue.get_nowait()
-            save_worker.queue.task_done()
-            cleared += 1
-        except asyncio.QueueEmpty:
-            break
-
-    await message.reply_text(f"`[ QUEUE CLEARED ] removed={cleared}`")
-
-
-@bot.on_message(filters.command("broadcast") & filters.private)
-async def broadcast_handler(_, message: Message):
-    if message.from_user.id != config.owner_id:
-        return
-
-    if not message.reply_to_message:
-        await message.reply_text("`[ ERROR ] Reply to any message with /broadcast.`")
-        return
-
-    sent = 0
-    failed = 0
-    async for user in users_col.find({}, {"_id": 1}):
-        try:
-            await safe_call(message.reply_to_message.copy(user["_id"]))
-            sent += 1
-        except Exception:
-            failed += 1
-        if (sent + failed) % 25 == 0:
-            await asyncio.sleep(1)
-
-    await message.reply_text(f"`[ BROADCAST ] sent={sent} failed={failed}`")
-
-
+# ------------------ MAIN ------------------ #
 async def main():
-    if uvloop is not None:
+    if uvloop:
         uvloop.install()
 
     await bot.start()
-    if userbot is not None:
+
+    if userbot:
         await userbot.start()
 
+    # start workers
     for _ in range(max(1, config.worker_count)):
-        asyncio.create_task(save_worker.run())
+        asyncio.create_task(worker_loop())
+
     print("Bot started.")
-    await asyncio.Event().wait()
+
+    # graceful shutdown
+    stop_event = asyncio.Event()
+
+    def shutdown():
+        print("Stopping bot...")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, shutdown)
+
+    await stop_event.wait()
+
+    await bot.stop()
+    if userbot:
+        await userbot.stop()
+    mongo.close()
 
 
 if __name__ == "__main__":
