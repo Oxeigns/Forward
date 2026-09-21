@@ -78,7 +78,7 @@ async def main() -> None:
         if await is_user_verified(bot, config.force_sub_id, user.id):
             if query.message is not None:
                 await safe_call(
-                    query.message.edit_text(
+                    lambda: query.message.edit_text(
                         "<b>Verification complete ✅</b>\n<i>Dashboard unlocked.</i>",
                         reply_markup=premium_dashboard_markup(config.force_sub_id),
                     )
@@ -98,7 +98,7 @@ async def main() -> None:
         if query.message is None:
             await query.answer("Nothing to clear.", show_alert=False)
             return
-        await safe_call(query.message.edit_text("<b>Panel cleared.</b>\nUse /start to open again."))
+        await safe_call(lambda: query.message.edit_text("<b>Panel cleared.</b>\nUse /start to open again."))
         await query.answer("Panel cleared", show_alert=False)
 
     async def stats_handler(_: Client, message: Message) -> None:
@@ -149,9 +149,9 @@ async def main() -> None:
         async for doc in users_col.find({}, {"_id": 1}):
             try:
                 if isinstance(payload, str):
-                    result = await safe_call(bot.send_message(doc["_id"], payload))
+                    result = await safe_call(lambda: bot.send_message(doc["_id"], payload))
                 else:
-                    result = await safe_call(payload.copy(doc["_id"]))
+                    result = await safe_call(lambda: payload.copy(doc["_id"]))
 
                 if result:
                     sent += 1
@@ -185,6 +185,9 @@ async def main() -> None:
         text = (message.text or "").strip()
 
         if INVITE_LINK_RE.match(text):
+            if user_id != config.owner_id:
+                await message.reply_text("Private-channel backups are available only to the bot owner.")
+                return
             _, info = await save_worker.requeue_after_invite(user_id, text)
             await message.reply_text(f"<code>{info}</code>")
             return
@@ -192,6 +195,10 @@ async def main() -> None:
         parsed = save_worker.parse_link(text)
         if not parsed:
             await message.reply_text("Send a valid Telegram message link.")
+            return
+
+        if parsed.is_private and user_id != config.owner_id:
+            await message.reply_text("Private-channel backups are available only to the bot owner.")
             return
 
         queue_position = save_worker.queue.qsize() + 1
