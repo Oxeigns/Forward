@@ -11,10 +11,10 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 SUPPORTED_STYLES = {"primary", "secondary", "success", "danger"}
 
 
-async def safe_call(coro):
+async def safe_call(operation):
     while True:
         try:
-            return await coro
+            return await operation()
         except FloodWait as e:
             await asyncio.sleep(e.value + 1)
 
@@ -84,7 +84,7 @@ async def is_user_verified(bot: Client, force_sub_id: str, user_id: int) -> bool
         return True
 
     try:
-        member = await safe_call(bot.get_chat_member(force_sub_id, user_id))
+        member = await safe_call(lambda: bot.get_chat_member(force_sub_id, user_id))
         if not member:
             return False
         return member.status not in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED}

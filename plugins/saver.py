@@ -54,10 +54,10 @@ class SaveWorker:
         self.pending_private: dict[int, Job] = {}
         self.joined_invites: set[str] = set()
 
-    async def safe_call(self, coro):
+    async def safe_call(self, operation):
         while True:
             try:
-                return await coro
+                return await operation()
             except FloodWait as e:
                 await asyncio.sleep(e.value + 1)
 
@@ -89,7 +89,7 @@ class SaveWorker:
             return True
 
         try:
-            await self.safe_call(self.userbot.join_chat(invite_link))
+            await self.safe_call(lambda: self.userbot.join_chat(invite_link))
             self.joined_invites.add(invite_link)
             return True
         except UserAlreadyParticipant:
@@ -120,7 +120,7 @@ class SaveWorker:
             text += f"\n<code>{extra}</code>"
 
         await self.safe_call(
-            self.bot.edit_message_text(
+            lambda: self.bot.edit_message_text(
                 chat_id=job.status_chat_id,
                 message_id=job.status_message_id,
                 text=text,
@@ -132,12 +132,12 @@ class SaveWorker:
         client = self.userbot if parsed.is_private else self.bot
         if client is None:
             raise PrivateAccessNeeded
-        return await self.safe_call(client.get_messages(parsed.chat_id, parsed.message_id))
+        return await self.safe_call(lambda: client.get_messages(parsed.chat_id, parsed.message_id))
 
     async def _send_text(self, job: Job, msg: Message):
         try:
             await self.safe_call(
-                self.bot.copy_message(
+                lambda: self.bot.copy_message(
                     chat_id=job.user_id,
                     from_chat_id=msg.chat.id,
                     message_id=msg.id,
@@ -146,10 +146,10 @@ class SaveWorker:
             )
         except Exception:
             body = msg.text or msg.caption or "(empty message)"
-            await self.safe_call(self.bot.send_message(job.user_id, body, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_message(job.user_id, body, protect_content=True))
 
     async def _download(self, msg: Message) -> str:
-        path = await self.safe_call(msg.download(file_name=f"{self.downloads_dir}/"))
+        path = await self.safe_call(lambda: msg.download(file_name=f"{self.downloads_dir}/"))
         if not path:
             raise RuntimeError("Download returned empty path")
         return path
@@ -157,17 +157,17 @@ class SaveWorker:
     async def _send_single_media(self, user_id: int, msg: Message, local_path: str):
         caption = msg.caption or ""
         if msg.photo:
-            await self.safe_call(self.bot.send_photo(user_id, local_path, caption=caption, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_photo(user_id, local_path, caption=caption, protect_content=True))
         elif msg.video:
-            await self.safe_call(self.bot.send_video(user_id, local_path, caption=caption, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_video(user_id, local_path, caption=caption, protect_content=True))
         elif msg.audio:
-            await self.safe_call(self.bot.send_audio(user_id, local_path, caption=caption, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_audio(user_id, local_path, caption=caption, protect_content=True))
         elif msg.voice:
-            await self.safe_call(self.bot.send_voice(user_id, local_path, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_voice(user_id, local_path, protect_content=True))
         elif msg.sticker:
-            await self.safe_call(self.bot.send_sticker(user_id, local_path, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_sticker(user_id, local_path, protect_content=True))
         else:
-            await self.safe_call(self.bot.send_document(user_id, local_path, caption=caption, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_document(user_id, local_path, caption=caption, protect_content=True))
 
     def _build_media(self, msg: Message, local_path: str, caption: str):
         if msg.photo:
@@ -186,7 +186,7 @@ class SaveWorker:
                 local = await self._download(msg)
                 local_files.append(local)
                 items.append(self._build_media(msg, local, (msg.caption or "") if idx == 0 else ""))
-            await self.safe_call(self.bot.send_media_group(job.user_id, items, protect_content=True))
+            await self.safe_call(lambda: self.bot.send_media_group(job.user_id, items, protect_content=True))
         finally:
             for f in local_files:
                 if os.path.exists(f):
@@ -216,7 +216,7 @@ class SaveWorker:
         await self.update_status(job, 45, "downloading")
         client = self.userbot if parsed.is_private and self.userbot else self.bot
         if source.media_group_id and client:
-            group = await self.safe_call(client.get_media_group(source.chat.id, source.id))
+            group = await self.safe_call(lambda: client.get_media_group(source.chat.id, source.id))
         else:
             group = [source]
 
